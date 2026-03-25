@@ -1,0 +1,138 @@
+{
+  "sink": {
+    "n_events": 12,
+    "duration_seconds": {
+      "mean": 49.2333,
+      "std": 21.0873,
+      "heuristic_override": null
+    },
+    "mean_plateau_freq_hz": {
+      "mean": 0.0104,
+      "std": 0.0029,
+      "heuristic_override": null
+    },
+    "estimated_cycles": {
+      "mean": 0.38,
+      "std": 0.1912,
+      "heuristic_override": null
+    },
+    "ramp_duration_seconds": {
+      "mean": 7.3767,
+      "std": 2.1228,
+      "heuristic_override": null
+    },
+    "peak_freq_hz": {
+      "mean": 0.6567,
+      "std": 0.2321,
+      "heuristic_override": null
+    },
+    "freq_stability": {
+      "mean": 7.7328,
+      "std": 1.0272,
+      "heuristic_override": null
+    },
+    "mean_vibration_intensity": {
+      "mean": 11.5948,
+      "std": 1.4558,
+      "heuristic_override": null
+    },
+    "signal_fraction": {
+      "mean": 0.7414,
+      "std": 0.0893,
+      "heuristic_override": null
+    },
+    "mean_plateau_vibration": {
+      "mean": 15.6305,
+      "std": 1.3289,
+      "heuristic_override": null
+    },
+    "mean_autocorr_lag1": {
+      "mean": 0.9653,
+      "std": 0.0062,
+      "heuristic_override": null
+    },
+    "mean_autocorr_lag5": {
+      "mean": 0.5312,
+      "std": 0.0836,
+      "heuristic_override": null
+    },
+    "mean_zero_crossing_rate": {
+      "mean": 0.076,
+      "std": 0.0245,
+      "heuristic_override": null
+    },
+    "mean_peak_to_peak": {
+      "mean": 28.1958,
+      "std": 5.5162,
+      "heuristic_override": null
+    }
+  },
+  "toilet": {
+    "n_events": 14,
+    "duration_seconds": {
+      "mean": 50.6236,
+      "std": 6.8113,
+      "heuristic_override": null
+    },
+    "mean_plateau_freq_hz": {
+      "mean": 0.0108,
+      "std": 0.0069,
+      "heuristic_override": null
+    },
+    "estimated_cycles": {
+      "mean": 0.3729,
+      "std": 0.2037,
+      "heuristic_override": null
+    },
+    "ramp_duration_seconds": {
+      "mean": 9.9779,
+      "std": 1.9912,
+      "heuristic_override": null
+    },
+    "peak_freq_hz": {
+      "mean": 0.7353,
+      "std": 0.5643,
+      "heuristic_override": null
+    },
+    "freq_stability": {
+      "mean": 7.8779,
+      "std": 0.5745,
+      "heuristic_override": null
+    },
+    "mean_vibration_intensity": {
+      "mean": 11.4652,
+      "std": 1.3697,
+      "heuristic_override": null
+    },
+    "signal_fraction": {
+      "mean": 0.7118,
+      "std": 0.078,
+      "heuristic_override": null
+    },
+    "mean_plateau_vibration": {
+      "mean": 16.1345,
+      "std": 0.6859,
+      "heuristic_override": null
+    },
+    "mean_autocorr_lag1": {
+      "mean": 0.8622,
+      "std": 0.0397,
+      "heuristic_override": null
+    },
+    "mean_autocorr_lag5": {
+      "mean": 0.0129,
+      "std": 0.2348,
+      "heuristic_override": null
+    },
+    "mean_zero_crossing_rate": {
+      "mean": 0.1289,
+      "std": 0.0391,
+      "heuristic_override": null
+    },
+    "mean_peak_to_peak": {
+      "mean": 34.25,
+      "std": 3.1176,
+      "heuristic_override": null
+    }
+  }
+}
