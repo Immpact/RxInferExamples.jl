@@ -378,7 +378,7 @@ def run_live_plot():
         if event.inaxes not in (ax1, ax2):
             return
         import matplotlib.dates as mdates
-        shift_s = VISIBLE_WINDOW_S * 0.3
+        shift_s = VISIBLE_WINDOW_S * 0.1
         if event.button == 'up':
             shift_s = -shift_s
         day_shift = shift_s / 86400.0
@@ -397,6 +397,9 @@ def run_live_plot():
         with state.lock:
             if len(state.values) < 20:
                 return
+
+            # Save current scroll position before clearing
+            saved_xlim = ax1.get_xlim() if not auto_follow[0] else None
 
             ts_arr = np.array(state.timestamps)
             x_arr = np.array(state.values)
@@ -461,10 +464,11 @@ def run_live_plot():
                 ax1.axvspan(dt_s, dt_e, color=color, alpha=0.2)
                 ax1.axvline(dt_s, color="#16a34a", lw=2, alpha=0.8)
 
-                # Find signal max in event range for label placement
+                # Find signal max in event range for label placement (clamp to visible area)
                 ev_mask = (ts_arr >= ev_ts_start) & (ts_arr <= ev_ts_end)
                 ev_vals = x_arr[ev_mask] if ev_mask.any() else x_arr
-                y_pos = np.max(ev_vals) + 1 if len(ev_vals) > 0 else np.percentile(x_arr, 95)
+                vis_hi = np.percentile(x_arr, 99)
+                y_pos = min(np.max(ev_vals) + 1, vis_hi) if len(ev_vals) > 0 else vis_hi
 
                 dt_mid = datetime.fromtimestamp((ev_ts_start + ev_ts_end) / 2)
                 lines = []
@@ -500,12 +504,15 @@ def run_live_plot():
             ax2.legend(fontsize=10)
             ax2.grid(True, alpha=0.2)
 
-            # Set visible x-axis window — auto-follow newest data
+            # Set visible x-axis window
             if auto_follow[0] and len(dt_arr) > 0:
                 right = dt_arr[-1]
                 left = right - timedelta(seconds=VISIBLE_WINDOW_S)
                 ax1.set_xlim(left, right)
                 ax2.set_xlim(left, right)
+            elif saved_xlim is not None:
+                ax1.set_xlim(saved_xlim)
+                ax2.set_xlim(saved_xlim)
 
     ani = FuncAnimation(fig, update, interval=PLOT_INTERVAL_MS, cache_frame_data=False)
     plt.tight_layout()
