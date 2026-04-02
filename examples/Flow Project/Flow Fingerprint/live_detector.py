@@ -11,10 +11,13 @@ Usage:
 """
 
 import json
+import io
+import pickle
 import threading
 import time
 from datetime import datetime, timezone, timedelta
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -23,7 +26,9 @@ matplotlib.use('macosx')
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from scipy.signal import savgol_filter, find_peaks
+from sklearn.metrics.pairwise import cosine_distances
 import requests
+import torch
 import websocket
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -108,33 +113,79 @@ def load_calibration_signals():
 
     return cal_signals
 
-# ─── Simple MASS-based classification (no TS2Vec needed for live) ────────────
+# ─── TS2Vec model + calibration embeddings ──────────────────────────────────
+SCRIPT_DIR = Path(__file__).parent
+MODEL_FILE = SCRIPT_DIR / "ts2vec_model.pkl"
+
+def load_ts2vec_model():
+    """Load the trained TS2Vec model from pickle."""
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    with open(MODEL_FILE, "rb") as f:
+        buffer = io.BytesIO(f.read())
+    original_load = torch.load
+    torch.load = lambda b, **kw: original_load(b, map_location=device, **{k: v for k, v in kw.items() if k != 'map_location'})
+    try:
+        model = pickle.load(buffer)
+    finally:
+        torch.load = original_load
+    model.device = device
+    model._net = model._net.to(device)
+    model.net = model.net.to(device)
+    print(f"TS2Vec model loaded on {device}")
+    return model
+
+def prepare_signal(sig):
+    """Z-normalize only. No resampling — preserves real oscillations."""
+    arr = sig.astype(np.float64)
+    mu, std = arr.mean(), arr.std()
+    if std > 1e-8:
+        arr = (arr - mu) / std
+    else:
+        arr = arr - mu
+    return arr.astype(np.float32)[:, np.newaxis]  # (N, 1)
+
+def encode_signal(model, sig):
+    """Encode a single variable-length signal into one embedding vector."""
+    data = prepare_signal(sig)[np.newaxis, :]  # (1, N, 1)
+    raw = model.encode(data, batch_size=1)      # (1, N, dim)
+    return raw.mean(axis=1)                     # (1, dim)
+
+def build_calibration_embeddings(model, cal_signals):
+    """Encode calibration signals and return embeddings + metadata."""
+    if not cal_signals:
+        return np.array([]), [], []
+    embs = [encode_signal(model, c["signal"]) for c in cal_signals]
+    emb = np.concatenate(embs, axis=0)
+    types = [c["type"] for c in cal_signals]
+    names = [c["name"] for c in cal_signals]
+    print(f"Calibration embeddings: {emb.shape}")
+    return emb, types, names
+
+# Globals set in main
+ts2vec_model = None
+cal_embeddings = np.array([])
+cal_types = []
+cal_names = []
+
 def classify_event(event_signal, cal_signals, top_k=3):
-    """Classify an event. Returns top_k predictions sorted by distance."""
-    if len(event_signal) < 10 or not cal_signals:
+    """Classify an event using TS2Vec cosine distance to calibration embeddings."""
+    if len(event_signal) < 10 or ts2vec_model is None or len(cal_embeddings) == 0:
         return [("unknown", "?", float("inf"))]
 
-    ev = event_signal.copy()
-    mu, std = ev.mean(), ev.std()
-    if std > 1e-8:
-        ev = (ev - mu) / std
+    ev_emb = encode_signal(ts2vec_model, event_signal)
+    cos_dist = cosine_distances(ev_emb, cal_embeddings)[0]
 
-    all_matches = []
-    for cal in cal_signals:
-        q = cal["signal"].copy()
-        q_mu, q_std = q.mean(), q.std()
-        if q_std > 1e-8:
-            q = (q - q_mu) / q_std
-
-        target_len = 100
-        ev_rs = np.interp(np.linspace(0, 1, target_len), np.linspace(0, 1, len(ev)), ev)
-        q_rs = np.interp(np.linspace(0, 1, target_len), np.linspace(0, 1, len(q)), q)
-
-        dist = np.sqrt(np.mean((ev_rs - q_rs) ** 2))
-        all_matches.append((cal["type"], cal["name"], dist))
-
-    all_matches.sort(key=lambda x: x[2])
-    return all_matches[:top_k]
+    matches = []
+    for j in range(len(cos_dist)):
+        matches.append((cal_types[j], cal_names[j], float(cos_dist[j])))
+    matches.sort(key=lambda x: x[2])
+    return matches[:top_k]
 
 # ─── Event detection on buffer ───────────────────────────────────────────────
 def detect_events(timestamps, values, sps):
@@ -520,11 +571,17 @@ def run_live_plot():
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    print("Loading TS2Vec model...")
+    ts2vec_model = load_ts2vec_model()
+
     print("Loading calibration labels...")
     state.cal_signals = load_calibration_signals()
     print(f"Loaded {len(state.cal_signals)} calibration patterns:")
     for c in state.cal_signals:
         print(f"  {c['name']} ({c['type']}): {len(c['signal'])} samples")
+
+    print("Building calibration embeddings...")
+    cal_embeddings, cal_types, cal_names = build_calibration_embeddings(ts2vec_model, state.cal_signals)
 
     print("\nSeeding buffer with recent data...")
     seed_buffer()
