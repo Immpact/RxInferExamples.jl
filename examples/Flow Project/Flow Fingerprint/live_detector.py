@@ -29,7 +29,14 @@ from scipy.signal import savgol_filter, find_peaks
 from sklearn.metrics.pairwise import cosine_distances
 import requests
 import torch
+import torch.nn as nn
+import torch.nn.functional as torch_F
 import websocket
+
+# ─── Classifier selection ───────────────────────────────────────────────────
+# "minirocket" → MiniROCKET + triplet-embedding + ridge (active path)
+# "ts2vec"     → legacy TS2Vec encoder + cosine to cal embeddings (kept intact, unused)
+CLASSIFIER = "minirocket"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 SENSOR_ID = 6
@@ -173,8 +180,9 @@ cal_embeddings = np.array([])
 cal_types = []
 cal_names = []
 
-def classify_event(event_signal, cal_signals, top_k=3):
-    """Classify an event using TS2Vec cosine distance to calibration embeddings."""
+def classify_event_ts2vec(event_signal, cal_signals, top_k=3):
+    """Classify an event using TS2Vec cosine distance to calibration embeddings.
+    Preserved intact from the original implementation; unused while CLASSIFIER != 'ts2vec'."""
     if len(event_signal) < 10 or ts2vec_model is None or len(cal_embeddings) == 0:
         return [("unknown", "?", float("inf"))]
 
@@ -186,6 +194,132 @@ def classify_event(event_signal, cal_signals, top_k=3):
         matches.append((cal_types[j], cal_names[j], float(cos_dist[j])))
     matches.sort(key=lambda x: x[2])
     return matches[:top_k]
+
+# ─── MiniROCKET + triplet classifier ────────────────────────────────────────
+MR_MODEL_FILE = SCRIPT_DIR / "minirocket_bundle.pkl"
+
+class ProjectionHead(nn.Module):
+    """Mirror of the notebook's triplet MLP so state_dict loads cleanly."""
+    def __init__(self, in_dim, hidden=256, out_dim=64, dropout=0.2):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.BatchNorm1d(hidden), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden, out_dim),
+        )
+    def forward(self, x):
+        return torch_F.normalize(self.net(x), dim=-1)
+
+# MR globals set in main
+mr_bundle = None
+mr_triplet = None          # ProjectionHead on device
+mr_device = None
+mr_cal_embeddings = None   # (n_cal, 64) L2-normalized triplet embeddings
+mr_cal_types = []
+mr_cal_names = []
+
+def load_minirocket_bundle():
+    """Load the MiniROCKET + triplet bundle saved from the MiniROCKET notebook."""
+    global mr_triplet, mr_device
+    if torch.cuda.is_available():
+        mr_device = "cuda"
+    elif torch.backends.mps.is_available():
+        mr_device = "mps"
+    else:
+        mr_device = "cpu"
+
+    with open(MR_MODEL_FILE, "rb") as f:
+        bundle = pickle.load(f)
+
+    cfg = bundle["triplet_config"]
+    net = ProjectionHead(cfg["in_dim"], hidden=cfg["hidden"],
+                         out_dim=cfg["out_dim"], dropout=cfg["dropout"])
+    net.load_state_dict(bundle["triplet_state_dict"])
+    net.eval()
+    net.to(mr_device)
+    mr_triplet = net
+    print(f"MiniROCKET bundle loaded on {mr_device}  "
+          f"(fixed_len={bundle['fixed_len']}, n_cal={len(bundle['calibration_names'])}, "
+          f"fixtures={len(bundle['fixture_names_ordered'])})")
+    return bundle
+
+def prepare_signal_mr(sig, target_len, baseline_samples):
+    """Baseline-subtract (median of first N samples) and pad/truncate to target_len.
+    Matches `prepare_signal` in the MiniROCKET notebook — not TS2Vec's z-norm."""
+    arr = np.asarray(sig, dtype=np.float64)
+    if len(arr) == 0:
+        return np.zeros(target_len, dtype=np.float32)
+    n_base = min(baseline_samples, max(1, len(arr) // 4))
+    baseline = float(np.median(arr[:n_base]))
+    arr = arr - baseline
+    if len(arr) >= target_len:
+        out = arr[:target_len]
+    else:
+        tail_n = min(5, len(arr))
+        pad_val = float(np.median(arr[-tail_n:])) if tail_n > 0 else 0.0
+        out = np.concatenate([arr, np.full(target_len - len(arr), pad_val)])
+    return out.astype(np.float32)
+
+def encode_signal_mr(sig):
+    """Raw signal → (1, 64) L2-normalized triplet embedding via MR → scaler → MLP."""
+    if mr_bundle is None or mr_triplet is None:
+        return None
+    prepped = prepare_signal_mr(sig, mr_bundle["fixed_len"], mr_bundle["baseline_samples"])
+    X3 = prepped[np.newaxis, np.newaxis, :]              # (1, 1, fixed_len)
+    F_raw = np.asarray(mr_bundle["minirocket"].transform(X3))  # (1, 10000)
+    F_s = mr_bundle["scaler"].transform(F_raw).astype(np.float32)
+    with torch.no_grad():
+        x = torch.from_numpy(F_s).to(mr_device)
+        # BatchNorm in eval mode is fine with batch=1 (uses running stats)
+        emb = mr_triplet(x).cpu().numpy()               # (1, 64)
+    return emb
+
+def build_calibration_embeddings_mr(bundle, cal_signals):
+    """Return calibration embeddings + types + names.
+    Prefers the embeddings baked into the bundle (computed on the notebook's exact cal set)
+    and falls back to re-embedding the live-fetched calibration windows if names mismatch."""
+    baked_emb = bundle.get("calibration_embeddings")
+    baked_names = bundle.get("calibration_names", [])
+    baked_types = bundle.get("calibration_types", [])
+
+    live_names = [c["name"] for c in cal_signals]
+    # If the bundle's cal set lines up with the live one (same names in same order), reuse it.
+    if baked_emb is not None and live_names == baked_names:
+        print(f"Using baked calibration embeddings: {baked_emb.shape}")
+        return np.asarray(baked_emb), list(baked_types), list(baked_names)
+
+    # Otherwise re-embed the live calibration windows so cal stays consistent with MR/scaler.
+    if not cal_signals:
+        return np.array([]), [], []
+    embs = [encode_signal_mr(c["signal"]) for c in cal_signals]
+    embs = [e for e in embs if e is not None]
+    if not embs:
+        return np.array([]), [], []
+    emb = np.concatenate(embs, axis=0)
+    types = [c["type"] for c in cal_signals]
+    names = [c["name"] for c in cal_signals]
+    print(f"Re-embedded calibration: {emb.shape}  (live names differed from bundle)")
+    return emb, types, names
+
+def classify_event_mr(event_signal, cal_signals, top_k=3):
+    """Classify by cosine distance from the triplet embedding to calibration embeddings."""
+    if len(event_signal) < 10 or mr_triplet is None or mr_cal_embeddings is None \
+            or len(mr_cal_embeddings) == 0:
+        return [("unknown", "?", float("inf"))]
+
+    ev_emb = encode_signal_mr(event_signal)
+    if ev_emb is None:
+        return [("unknown", "?", float("inf"))]
+    cos_dist = cosine_distances(ev_emb, mr_cal_embeddings)[0]
+
+    matches = [(mr_cal_types[j], mr_cal_names[j], float(cos_dist[j])) for j in range(len(cos_dist))]
+    matches.sort(key=lambda x: x[2])
+    return matches[:top_k]
+
+# Dispatcher — all existing callsites use this name, so switching CLASSIFIER swaps behavior.
+def classify_event(event_signal, cal_signals, top_k=3):
+    if CLASSIFIER == "ts2vec":
+        return classify_event_ts2vec(event_signal, cal_signals, top_k=top_k)
+    return classify_event_mr(event_signal, cal_signals, top_k=top_k)
 
 # ─── Event detection on buffer ───────────────────────────────────────────────
 def detect_events(timestamps, values, sps):
@@ -571,8 +705,13 @@ def run_live_plot():
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Loading TS2Vec model...")
-    ts2vec_model = load_ts2vec_model()
+    print(f"Active classifier: {CLASSIFIER}")
+    if CLASSIFIER == "ts2vec":
+        print("Loading TS2Vec model...")
+        ts2vec_model = load_ts2vec_model()
+    else:
+        print("Loading MiniROCKET bundle...")
+        mr_bundle = load_minirocket_bundle()
 
     print("Loading calibration labels...")
     state.cal_signals = load_calibration_signals()
@@ -581,7 +720,10 @@ if __name__ == "__main__":
         print(f"  {c['name']} ({c['type']}): {len(c['signal'])} samples")
 
     print("Building calibration embeddings...")
-    cal_embeddings, cal_types, cal_names = build_calibration_embeddings(ts2vec_model, state.cal_signals)
+    if CLASSIFIER == "ts2vec":
+        cal_embeddings, cal_types, cal_names = build_calibration_embeddings(ts2vec_model, state.cal_signals)
+    else:
+        mr_cal_embeddings, mr_cal_types, mr_cal_names = build_calibration_embeddings_mr(mr_bundle, state.cal_signals)
 
     print("\nSeeding buffer with recent data...")
     seed_buffer()
